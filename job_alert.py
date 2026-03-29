@@ -17,6 +17,7 @@ import time
 import logging
 import hashlib
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -247,36 +248,67 @@ GH_SLUGS = [
     # ── Consumer / marketplace ──
     "instacart", "postmates", "shipt", "opendoor", "compass",
     "zillow", "redfin", "rover", "faire", "stitch-fix",
+
+    # ── SF Tech Startups ──
+    "openai", "anthropic", "scaleai", "glean", "perplexityai",
+    "verkada", "ironclad", "carta", "okta", "splunk",
+    "newrelic", "wandb", "workato", "tripactions", "flexport",
+    "gong-io", "lob", "pilot", "mosaic", "census",
+    "retool", "watershed", "vanta", "drata", "secureframe",
+    "persona", "sardine", "lithic", "unit", "increase",
+
+    # ── Dallas / DFW Companies ──
+    "matchgroup", "capitalone", "sabre", "toyotaconnected",
+    "mckesson", "moneylion", "carvana", "peloton", "slalom",
+    "dialexa", "sendbird", "keurig", "nortelinc", "aecom",
+    "hilton", "nokia", "ericsson", "tenet", "jacobs",
+    "atandt", "americanairlines", "southwestairlines", "7eleven",
+    "goldmansachs", "jpmorganchase", "fidelity", "williamsonema",
 ]
+
+GH_WORKERS = 20   # concurrent Greenhouse requests — fast without hammering
+
+
+def _fetch_one_greenhouse(slug: str) -> list[dict]:
+    """Fetch jobs for a single Greenhouse company slug. Returns list of matched jobs."""
+    url = f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs"
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+        if r.status_code in (404, 410):
+            return []
+        if r.status_code != 200:
+            return []
+        results = []
+        for job in r.json().get("jobs", []):
+            title = job.get("title", "")
+            if not is_match(title):
+                continue
+            jid = str(job.get("id", ""))
+            results.append({
+                "id":       f"gh_{jid}",
+                "source":   "Greenhouse",
+                "title":    title,
+                "company":  (job.get("company") or {}).get("name") or slug.replace("-", " ").title(),
+                "location": (job.get("location") or {}).get("name", ""),
+                "url":      job.get("absolute_url") or f"https://boards.greenhouse.io/{slug}/jobs/{jid}",
+            })
+        return results
+    except Exception as e:
+        log.warning("Greenhouse error (%s): %s", slug, e)
+        return []
 
 
 def fetch_greenhouse() -> list[dict]:
-    jobs     = []
-    seen_gh  = set()
-    for slug in GH_SLUGS:
-        url = f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs"
-        try:
-            r = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
-            if r.status_code in (404, 410):
-                continue   # company doesn't have this slug
-            if r.status_code != 200:
-                continue
-            for job in r.json().get("jobs", []):
-                jid   = str(job.get("id", ""))
-                title = job.get("title", "")
-                if jid in seen_gh or not is_match(title):
-                    continue
-                seen_gh.add(jid)
-                jobs.append({
-                    "id":       f"gh_{jid}",
-                    "source":   "Greenhouse",
-                    "title":    title,
-                    "company":  (job.get("company") or {}).get("name") or slug.replace("-", " ").title(),
-                    "location": (job.get("location") or {}).get("name", ""),
-                    "url":      job.get("absolute_url") or f"https://boards.greenhouse.io/{slug}/jobs/{jid}",
-                })
-        except Exception as e:
-            log.warning("Greenhouse error (%s): %s", slug, e)
+    jobs    = []
+    seen_gh = set()
+    # Fetch all companies in parallel — 20 workers turns ~100s into ~8s
+    with ThreadPoolExecutor(max_workers=GH_WORKERS) as pool:
+        futures = {pool.submit(_fetch_one_greenhouse, slug): slug for slug in GH_SLUGS}
+        for future in as_completed(futures):
+            for job in future.result():
+                if job["id"] not in seen_gh:
+                    seen_gh.add(job["id"])
+                    jobs.append(job)
     log.info("Greenhouse: %d matches across %d companies", len(jobs), len(GH_SLUGS))
     return jobs
 
