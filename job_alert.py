@@ -133,89 +133,107 @@ def send_telegram(job: dict):
 
 
 # ── LinkedIn ──────────────────────────────────────────────────────────────────
+# Paginates through ALL results using start= offset.
+# f_TPR=r3600 = posted in last hour. Stop when a page returns 0 job IDs.
 _LI_BASE = (
     "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
-    "?location=United+States&f_TPR=r3600&start=0&count=25&keywords={kw}"
+    "?location=United+States&f_TPR=r3600&count=25&keywords={kw}&start={start}"
 )
+_LI_MAX_PAGES = 20   # safety cap: 20 pages × 25 = 500 results per keyword max
 
 
 def fetch_linkedin() -> list[dict]:
-    jobs   = []
+    jobs    = []
     seen_li = set()
     for kw in ["associate product manager", "product management intern", "pm intern"]:
-        url = _LI_BASE.format(kw=requests.utils.quote(kw))
-        try:
-            r = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
-            if r.status_code != 200:
-                log.warning("LinkedIn (%s) → HTTP %s", kw, r.status_code)
-                continue
-            html = r.text
-            ids    = re.findall(r'data-entity-urn="urn:li:jobPosting:(\d+)"', html)
-            titles = re.findall(r'class="base-search-card__title"[^>]*>\s*([^<]+?)\s*<', html)
-            comps  = re.findall(r'class="hidden-nested-link"[^>]*>\s*([^<]+?)\s*<', html)
-            locs   = re.findall(r'class="job-search-card__location"[^>]*>\s*([^<]+?)\s*<', html)
-            for i, jid in enumerate(ids):
-                if jid in seen_li:
-                    continue
-                title   = titles[i].strip() if i < len(titles) else ""
-                company = comps[i].strip()  if i < len(comps)  else "Unknown"
-                loc     = locs[i].strip()   if i < len(locs)   else ""
-                if not is_match(title):
-                    continue
-                seen_li.add(jid)
-                jobs.append({
-                    "id":       f"li_{jid}",
-                    "source":   "LinkedIn",
-                    "title":    title,
-                    "company":  company,
-                    "location": loc,
-                    "url":      f"https://www.linkedin.com/jobs/view/{jid}/",
-                })
-        except Exception as e:
-            log.warning("LinkedIn error (%s): %s", kw, e)
-        time.sleep(1.5)   # polite delay between LinkedIn requests
+        for page in range(_LI_MAX_PAGES):
+            start = page * 25
+            url   = _LI_BASE.format(kw=requests.utils.quote(kw), start=start)
+            try:
+                r = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+                if r.status_code != 200:
+                    log.warning("LinkedIn (%s) p%d → HTTP %s", kw, page, r.status_code)
+                    break
+                html   = r.text
+                ids    = re.findall(r'data-entity-urn="urn:li:jobPosting:(\d+)"', html)
+                if not ids:
+                    break   # no more results — stop paginating this keyword
+                titles = re.findall(r'class="base-search-card__title"[^>]*>\s*([^<]+?)\s*<', html)
+                comps  = re.findall(r'class="hidden-nested-link"[^>]*>\s*([^<]+?)\s*<', html)
+                locs   = re.findall(r'class="job-search-card__location"[^>]*>\s*([^<]+?)\s*<', html)
+                for i, jid in enumerate(ids):
+                    if jid in seen_li:
+                        continue
+                    title   = titles[i].strip() if i < len(titles) else ""
+                    company = comps[i].strip()  if i < len(comps)  else "Unknown"
+                    loc     = locs[i].strip()   if i < len(locs)   else ""
+                    if not is_match(title):
+                        continue
+                    seen_li.add(jid)
+                    jobs.append({
+                        "id":       f"li_{jid}",
+                        "source":   "LinkedIn",
+                        "title":    title,
+                        "company":  company,
+                        "location": loc,
+                        "url":      f"https://www.linkedin.com/jobs/view/{jid}/",
+                    })
+                if len(ids) < 25:
+                    break   # last page had fewer than 25 — no more pages
+            except Exception as e:
+                log.warning("LinkedIn error (%s) p%d: %s", kw, page, e)
+                break
+            time.sleep(1)   # polite delay between pages
+        time.sleep(1.5)     # polite delay between keywords
     log.info("LinkedIn: %d matches", len(jobs))
     return jobs
 
 
 # ── Workable ──────────────────────────────────────────────────────────────────
 # Public API v1 — confirmed working without auth (v3 is dead as of 2026).
-# Fields: id (UUID), title, company.title, location, url, created, workplace
-_WK_BASE = "https://jobs.workable.com/api/v1/jobs?location=USA&query={kw}"
+# Paginates through ALL results using nextPageToken until exhausted.
+_WK_BASE    = "https://jobs.workable.com/api/v1/jobs?location=USA&query={kw}"
+_WK_MAX_PAGES = 20   # safety cap — 20 pages × ~20 results = ~400 per keyword max
 
 
 def fetch_workable() -> list[dict]:
     jobs    = []
     seen_wk = set()
     for kw in ["associate product manager", "product management intern", "pm intern"]:
-        url = _WK_BASE.format(kw=requests.utils.quote(kw))
-        try:
-            r = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
-            if r.status_code != 200:
-                log.warning("Workable (%s) → HTTP %s", kw, r.status_code)
-                continue
-            for job in r.json().get("jobs", []):
-                title = job.get("title", "")
-                jid   = job.get("id", "")
-                if not jid:
-                    jid = hashlib.md5(title.encode()).hexdigest()[:10]
-                if jid in seen_wk or not is_match(title):
-                    continue
-                seen_wk.add(jid)
-                # location can be a string or object
-                loc = job.get("location") or ""
-                if isinstance(loc, dict):
-                    loc = loc.get("city") or loc.get("country") or ""
-                jobs.append({
-                    "id":       f"wk_{jid}",
-                    "source":   "Workable",
-                    "title":    title,
-                    "company":  (job.get("company") or {}).get("title", "Unknown"),
-                    "location": loc,
-                    "url":      job.get("url") or f"https://jobs.workable.com/",
-                })
-        except Exception as e:
-            log.warning("Workable error (%s): %s", kw, e)
+        page_token = None
+        for page in range(_WK_MAX_PAGES):
+            url = _WK_BASE.format(kw=requests.utils.quote(kw))
+            if page_token:
+                url += f"&pageToken={requests.utils.quote(page_token)}"
+            try:
+                r = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+                if r.status_code != 200:
+                    log.warning("Workable (%s) p%d → HTTP %s", kw, page, r.status_code)
+                    break
+                data       = r.json()
+                page_token = data.get("nextPageToken")
+                for job in data.get("jobs", []):
+                    title = job.get("title", "")
+                    jid   = job.get("id", "") or hashlib.md5(title.encode()).hexdigest()[:10]
+                    if jid in seen_wk or not is_match(title):
+                        continue
+                    seen_wk.add(jid)
+                    loc = job.get("location") or ""
+                    if isinstance(loc, dict):
+                        loc = loc.get("city") or loc.get("country") or ""
+                    jobs.append({
+                        "id":       f"wk_{jid}",
+                        "source":   "Workable",
+                        "title":    title,
+                        "company":  (job.get("company") or {}).get("title", "Unknown"),
+                        "location": loc,
+                        "url":      job.get("url") or "https://jobs.workable.com/",
+                    })
+                if not page_token:
+                    break   # no more pages
+            except Exception as e:
+                log.warning("Workable error (%s) p%d: %s", kw, page, e)
+                break
     log.info("Workable: %d matches", len(jobs))
     return jobs
 
