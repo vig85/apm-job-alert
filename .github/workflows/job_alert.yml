@@ -1,0 +1,46 @@
+name: Job Alert — APM & Product Intern
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # every 5 minutes, 24/7, on GitHub's servers
+  workflow_dispatch:          # manual "Run workflow" button for testing
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4        # kill if it hangs (stays well within free tier)
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      # ── Restore seen-jobs state from last run ──
+      - name: Restore seen-jobs cache
+        uses: actions/cache/restore@v4
+        with:
+          path: seen_jobs.json
+          key: seen-jobs-${{ github.run_id }}
+          restore-keys: seen-jobs-
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -q requests
+
+      # ── Run the alert script ──
+      - name: Scan job boards
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python job_alert.py
+
+      # ── Persist updated state for next run ──
+      - name: Save seen-jobs cache
+        if: always()    # save even if the scan step had warnings
+        uses: actions/cache/save@v4
+        with:
+          path: seen_jobs.json
+          key: seen-jobs-${{ github.run_id }}
