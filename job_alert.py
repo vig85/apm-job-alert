@@ -80,6 +80,30 @@ def is_match(title: str) -> bool:
     return any(p.search(title) for p in INCLUDE)
 
 
+# ── Cross-platform deduplication ──────────────────────────────────────────────
+def _fingerprint(job: dict) -> str:
+    """Stable title+company key for cross-platform dedup within a single run.
+    Prevents alerting twice if the same role appears on LinkedIn AND Greenhouse."""
+    title   = re.sub(r'\s+', ' ', job.get("title",   "").lower().strip())
+    company = re.sub(r'\s+', ' ', job.get("company", "").lower().strip())
+    # Strip common suffixes that vary across platforms
+    company = re.sub(r'\s*(inc\.?|llc\.?|ltd\.?|corp\.?|co\.?)$', '', company)
+    return f"{title}|{company}"
+
+
+def dedup_across_platforms(jobs: list[dict]) -> list[dict]:
+    """Keep only the first occurrence of each title+company combination.
+    Prefers LinkedIn (direct apply link) > Workable > Greenhouse ordering."""
+    seen_fp : set  = set()
+    result  : list = []
+    for job in jobs:
+        fp = _fingerprint(job)
+        if fp not in seen_fp:
+            seen_fp.add(fp)
+            result.append(job)
+    return result
+
+
 # ── State ─────────────────────────────────────────────────────────────────────
 def load_seen() -> set:
     if STATE_FILE.exists():
@@ -133,13 +157,27 @@ def send_telegram(job: dict):
 
 
 # ── LinkedIn ──────────────────────────────────────────────────────────────────
-# Paginates through ALL results using start= offset.
-# f_TPR=r3600 = posted in last hour. Stop when a page returns 0 job IDs.
+# Paginates ALL results. Parses each card individually to enforce the
+# <200 applicants rule. Cards without an applicant count (new postings) pass.
 _LI_BASE = (
     "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
     "?location=United+States&f_TPR=r3600&count=25&keywords={kw}&start={start}"
 )
-_LI_MAX_PAGES = 20   # safety cap: 20 pages × 25 = 500 results per keyword max
+_LI_MAX_PAGES      = 20    # 20 × 25 = 500 results per keyword max
+_LI_MAX_APPLICANTS = 200   # skip jobs at or above this threshold
+
+
+def _li_applicant_count(card_html: str) -> int:
+    """Return applicant count from a single LinkedIn card's HTML.
+    Returns 0 if not shown (new posting — treat as low applicants)."""
+    # "Over 200 applicants" → 201
+    if re.search(r'over\s+200\s+applicants?', card_html, re.I):
+        return 201
+    # "47 applicants" or "1,234 applicants"
+    m = re.search(r'([\d,]+)\s+applicants?', card_html, re.I)
+    if m:
+        return int(m.group(1).replace(',', ''))
+    return 0   # not shown → new job, include it
 
 
 def fetch_linkedin() -> list[dict]:
@@ -154,22 +192,34 @@ def fetch_linkedin() -> list[dict]:
                 if r.status_code != 200:
                     log.warning("LinkedIn (%s) p%d → HTTP %s", kw, page, r.status_code)
                     break
-                html   = r.text
-                ids    = re.findall(r'data-entity-urn="urn:li:jobPosting:(\d+)"', html)
-                if not ids:
-                    break   # no more results — stop paginating this keyword
-                titles = re.findall(r'class="base-search-card__title"[^>]*>\s*([^<]+?)\s*<', html)
-                comps  = re.findall(r'class="hidden-nested-link"[^>]*>\s*([^<]+?)\s*<', html)
-                locs   = re.findall(r'class="job-search-card__location"[^>]*>\s*([^<]+?)\s*<', html)
-                for i, jid in enumerate(ids):
+                html = r.text
+                # Split into per-card chunks so applicant count aligns with each job
+                cards = re.split(r'(?=data-entity-urn="urn:li:jobPosting:)', html)
+                if len(cards) <= 1:
+                    break   # no more results
+                new_on_page = 0
+                for card in cards:
+                    jid_m = re.search(r'data-entity-urn="urn:li:jobPosting:(\d+)"', card)
+                    if not jid_m:
+                        continue
+                    jid = jid_m.group(1)
                     if jid in seen_li:
                         continue
-                    title   = titles[i].strip() if i < len(titles) else ""
-                    company = comps[i].strip()  if i < len(comps)  else "Unknown"
-                    loc     = locs[i].strip()   if i < len(locs)   else ""
+                    # ── Applicant count filter ──
+                    count = _li_applicant_count(card)
+                    if count >= _LI_MAX_APPLICANTS:
+                        seen_li.add(jid)   # track it so we don't recheck
+                        continue
+                    title_m = re.search(r'class="base-search-card__title"[^>]*>\s*([^<]+?)\s*<', card)
+                    comp_m  = re.search(r'class="hidden-nested-link"[^>]*>\s*([^<]+?)\s*<', card)
+                    loc_m   = re.search(r'class="job-search-card__location"[^>]*>\s*([^<]+?)\s*<', card)
+                    title   = title_m.group(1).strip() if title_m else ""
+                    company = comp_m.group(1).strip()  if comp_m  else "Unknown"
+                    loc     = loc_m.group(1).strip()   if loc_m   else ""
                     if not is_match(title):
                         continue
                     seen_li.add(jid)
+                    new_on_page += 1
                     jobs.append({
                         "id":       f"li_{jid}",
                         "source":   "LinkedIn",
@@ -178,14 +228,14 @@ def fetch_linkedin() -> list[dict]:
                         "location": loc,
                         "url":      f"https://www.linkedin.com/jobs/view/{jid}/",
                     })
-                if len(ids) < 25:
-                    break   # last page had fewer than 25 — no more pages
+                if len(cards) < 26:   # < 25 cards + 1 leading empty = last page
+                    break
             except Exception as e:
                 log.warning("LinkedIn error (%s) p%d: %s", kw, page, e)
                 break
-            time.sleep(1)   # polite delay between pages
-        time.sleep(1.5)     # polite delay between keywords
-    log.info("LinkedIn: %d matches", len(jobs))
+            time.sleep(1)    # polite delay between pages
+        time.sleep(1.5)      # polite delay between keywords
+    log.info("LinkedIn: %d matches (filtered <200 applicants)", len(jobs))
     return jobs
 
 
@@ -338,9 +388,15 @@ def main():
 
     log.info("Mode: %s | Previously tracked: %d jobs", "SEED" if seed_mode else "LIVE", len(seen))
 
-    all_jobs  = fetch_linkedin() + fetch_workable() + fetch_greenhouse()
-    new_ids   = {job["id"] for job in all_jobs}
-    new_jobs  = [job for job in all_jobs if job["id"] not in seen]
+    # Order matters: LinkedIn first → preferred source when cross-platform dedup fires
+    all_jobs = fetch_linkedin() + fetch_workable() + fetch_greenhouse()
+    new_ids  = {job["id"] for job in all_jobs}
+
+    # Step 1 — filter to jobs not seen in previous runs
+    new_jobs = [job for job in all_jobs if job["id"] not in seen]
+
+    # Step 2 — cross-platform dedup: same title+company from multiple sources = 1 alert
+    new_jobs = dedup_across_platforms(new_jobs)
 
     if seed_mode:
         log.info("Seed complete. Indexed %d jobs. No alerts sent.", len(new_ids))
