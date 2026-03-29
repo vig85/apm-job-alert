@@ -178,12 +178,13 @@ def fetch_linkedin() -> list[dict]:
 
 
 # ── Workable ──────────────────────────────────────────────────────────────────
-# Workable has a real public search API — no company list needed.
-_WK_BASE = "https://jobs.workable.com/api/v3/jobs?details=true&query={kw}"
+# Public API v1 — confirmed working without auth (v3 is dead as of 2026).
+# Fields: id (UUID), title, company.title, location, url, created, workplace
+_WK_BASE = "https://jobs.workable.com/api/v1/jobs?location=USA&query={kw}"
 
 
 def fetch_workable() -> list[dict]:
-    jobs = []
+    jobs    = []
     seen_wk = set()
     for kw in ["associate product manager", "product management intern", "pm intern"]:
         url = _WK_BASE.format(kw=requests.utils.quote(kw))
@@ -192,19 +193,25 @@ def fetch_workable() -> list[dict]:
             if r.status_code != 200:
                 log.warning("Workable (%s) → HTTP %s", kw, r.status_code)
                 continue
-            for job in r.json().get("results", []):
-                title     = job.get("title", "")
-                shortcode = job.get("shortcode") or hashlib.md5(title.encode()).hexdigest()[:10]
-                if shortcode in seen_wk or not is_match(title):
+            for job in r.json().get("jobs", []):
+                title = job.get("title", "")
+                jid   = job.get("id", "")
+                if not jid:
+                    jid = hashlib.md5(title.encode()).hexdigest()[:10]
+                if jid in seen_wk or not is_match(title):
                     continue
-                seen_wk.add(shortcode)
+                seen_wk.add(jid)
+                # location can be a string or object
+                loc = job.get("location") or ""
+                if isinstance(loc, dict):
+                    loc = loc.get("city") or loc.get("country") or ""
                 jobs.append({
-                    "id":       f"wk_{shortcode}",
+                    "id":       f"wk_{jid}",
                     "source":   "Workable",
                     "title":    title,
-                    "company":  (job.get("company") or {}).get("name", "Unknown"),
-                    "location": (job.get("location") or {}).get("city", ""),
-                    "url":      job.get("url") or f"https://jobs.workable.com/view/{shortcode}",
+                    "company":  (job.get("company") or {}).get("title", "Unknown"),
+                    "location": loc,
+                    "url":      job.get("url") or f"https://jobs.workable.com/",
                 })
         except Exception as e:
             log.warning("Workable error (%s): %s", kw, e)

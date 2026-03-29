@@ -29,7 +29,7 @@ defined in `.github/workflows/job_alert.yml`.
 | `EXCLUDE` list | Regex patterns that disqualify a match (design intern, senior PM, etc.) |
 | `GH_SLUGS` list | Company slugs for Greenhouse (per-company API, no global search exists) |
 | `fetch_linkedin()` | Scrapes LinkedIn guest jobs API, filtered to last hour (`f_TPR=r3600`) |
-| `fetch_workable()` | Calls Workable's public search API — no company list needed |
+| `fetch_workable()` | Calls Workable's public API v1 — no company list needed. v3 is dead as of 2026. Fields: `id`, `title`, `company.title`, `location`, `url` |
 | `fetch_greenhouse()` | Iterates `GH_SLUGS` and calls each company's Greenhouse board API |
 | `send_telegram()` | POSTs to Telegram Bot API using MarkdownV2 formatting |
 | `main()` | Orchestrates fetch → diff → alert → save. `--seed` flag skips alerts (first run) |
@@ -77,6 +77,14 @@ export TELEGRAM_CHAT_ID=...
 python job_alert.py --seed   # index existing jobs without sending alerts
 python job_alert.py          # normal run — sends alerts for any new jobs
 ```
+
+## Verified API endpoints (tested March 2026)
+
+| Platform | Endpoint | Auth needed? | Notes |
+|---|---|---|---|
+| LinkedIn | `linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?keywords=...&f_TPR=r3600` | ❌ No | Guest API, no login. Returns HTML cards. |
+| Workable | `jobs.workable.com/api/v1/jobs?query=...&location=USA` | ❌ No | JSON, global search. v3 is dead. |
+| Greenhouse | `boards-api.greenhouse.io/v1/boards/{slug}/jobs` | ❌ No | Per-company only. `my.greenhouse.io` requires login — can't use. |
 
 ## What "Rippling" means here
 Rippling is an HR platform that companies use as an ATS. Individual company job boards
