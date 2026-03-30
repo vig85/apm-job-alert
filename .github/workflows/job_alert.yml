@@ -16,10 +16,10 @@ jobs:
 
       # ── Restore seen-jobs state from last run ──
       - name: Restore seen-jobs cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: seen_jobs.json
-          key: seen-jobs-${{ github.run_id }}
+          key: seen-jobs-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: seen-jobs-
 
       - name: Set up Python 3.12
@@ -40,7 +40,7 @@ jobs:
       # ── Persist updated state for next run ──
       - name: Save seen-jobs cache
         if: always()    # save even if the scan step had warnings
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: seen_jobs.json
-          key: seen-jobs-${{ github.run_id }}
+          key: seen-jobs-${{ github.run_id }}-${{ github.run_attempt }}
