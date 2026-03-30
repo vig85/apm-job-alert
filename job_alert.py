@@ -236,6 +236,15 @@ _LI_BASE = (
 _LI_MAX_PAGES      = 20    # 20 × 25 = 500 results per keyword max
 _LI_MAX_APPLICANTS = 200   # skip jobs at or above this threshold
 
+# Job aggregators that repost other companies' listings — skip them.
+# Their cards show the aggregator as the company, not the actual employer.
+_LI_AGGREGATORS = re.compile(
+    r'\b(lensa|ziprecruiter|talentify|jooble|adzuna|betterleave'
+    r'|jobgether|recruiting\.com|jobrapido|neuvoo|talent\.com|careerjet'
+    r'|simplyhired|snagajob|dice|hired\.com|ladders)\b',
+    re.I,
+)
+
 
 def _li_applicant_count(card_html: str) -> int:
     """Return applicant count from a single LinkedIn card's HTML.
@@ -286,6 +295,9 @@ def fetch_linkedin() -> list[dict]:
                     title   = title_m.group(1).strip() if title_m else ""
                     company = comp_m.group(1).strip()  if comp_m  else "Unknown"
                     loc     = loc_m.group(1).strip()   if loc_m   else ""
+                    if _LI_AGGREGATORS.search(company):
+                        seen_li.add(jid)   # mark seen so we don't recheck
+                        continue
                     if not is_match(title):
                         continue
                     seen_li.add(jid)
