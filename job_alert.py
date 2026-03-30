@@ -16,7 +16,6 @@ import re
 import time
 import logging
 import hashlib
-from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
@@ -105,29 +104,6 @@ def dedup_across_platforms(jobs: list[dict]) -> list[dict]:
             seen_fp.add(fp)
             result.append(job)
     return result
-
-
-# ── Recency filter ────────────────────────────────────────────────────────────
-RECENT_DAYS = 30   # ignore jobs posted more than this many days ago
-
-
-def is_recent(date_str: str) -> bool:
-    """Return True if date_str is within the last RECENT_DAYS days.
-    Accepts ISO 8601 strings like '2026-03-26T18:55:01.749Z' or '2026-02-25T06:45:34-05:00'.
-    Returns True if date cannot be parsed (fail open — don't miss jobs)."""
-    if not date_str:
-        return True
-    try:
-        # Normalise: replace trailing Z with +00:00 for fromisoformat()
-        ds = date_str.strip().replace("Z", "+00:00")
-        # Python 3.9 fromisoformat doesn't handle fractional seconds + offset together
-        # Strip fractional seconds if present
-        ds = re.sub(r'\.\d+(?=[+-])', '', ds)
-        posted = datetime.fromisoformat(ds)
-        cutoff = datetime.now(timezone.utc) - timedelta(days=RECENT_DAYS)
-        return posted >= cutoff
-    except Exception:
-        return True   # if we can't parse, include it
 
 
 # ── State ─────────────────────────────────────────────────────────────────────
@@ -295,8 +271,6 @@ def fetch_workable() -> list[dict]:
                     jid   = job.get("id", "") or hashlib.md5(title.encode()).hexdigest()[:10]
                     if jid in seen_wk or not is_match(title):
                         continue
-                    if not is_recent(job.get("created") or job.get("updated")):
-                        continue
                     seen_wk.add(jid)
                     loc = job.get("location") or ""
                     if isinstance(loc, dict):
@@ -380,8 +354,6 @@ def _fetch_one_greenhouse(slug: str) -> list[dict]:
         for job in r.json().get("jobs", []):
             title = job.get("title", "")
             if not is_match(title):
-                continue
-            if not is_recent(job.get("first_published") or job.get("updated_at")):
                 continue
             jid = str(job.get("id", ""))
             results.append({
