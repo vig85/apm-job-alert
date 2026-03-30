@@ -228,10 +228,11 @@ def send_telegram(job: dict):
 # <200 applicants rule. Cards without an applicant count (new postings) pass.
 _LI_BASE = (
     "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
-    "?location=United+States&f_TPR=r86400&f_E=1%2C2%2C3&count=25&keywords={kw}&start={start}"
+    "?location=United+States&f_TPR=r86400&count=25&keywords={kw}&start={start}"
 )
 # f_TPR=r86400 = last 24 hours.
-# f_E=1,2,3   = Internship, Entry level, Associate — LinkedIn filters seniority for us.
+# No f_E filter — many companies don't set experience level, so filtering by it
+# hides most postings. Seniority is handled by INCLUDE/EXCLUDE title patterns.
 # seen_jobs.json dedup ensures we never re-alert on the same job.
 _LI_MAX_PAGES      = 20    # 20 × 25 = 500 results per keyword max
 _LI_MAX_APPLICANTS = 200   # skip jobs at or above this threshold
