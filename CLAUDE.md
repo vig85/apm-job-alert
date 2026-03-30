@@ -1,10 +1,10 @@
 # Job Alert — Claude Context
 
 ## What this project does
-Monitors LinkedIn, Workable, and Greenhouse every 5 minutes for new Associate Product
-Manager (APM) and Product Intern job postings. Sends a Telegram message immediately
-when a new match is found. Runs on GitHub Actions (free, public repo) — nothing runs
-locally.
+Monitors LinkedIn, Workable, Greenhouse, Lever, and Ashby every 5 minutes for new
+Associate Product Manager (APM) and Product Intern job postings. Sends a Telegram
+message immediately when a new match is found. Runs on GitHub Actions (free, public
+repo) — nothing runs locally.
 
 ## Single file: job_alert.py
 Everything lives in `job_alert.py`. There is no framework, no database, no extra
@@ -28,11 +28,15 @@ defined in `.github/workflows/job_alert.yml`.
 | `INCLUDE` list | Regex patterns a title MUST match (APM, product intern, etc.) |
 | `EXCLUDE` list | Regex patterns that disqualify a match (design intern, senior PM, etc.) |
 | `GH_SLUGS` list | Company slugs for Greenhouse (per-company API, no global search exists) |
-| `fetch_linkedin()` | Scrapes LinkedIn guest jobs API, filtered to last hour (`f_TPR=r3600`) |
-| `fetch_workable()` | Calls Workable's public API v1 — no company list needed. v3 is dead as of 2026. Fields: `id`, `title`, `company.title`, `location`, `url` |
-| `fetch_greenhouse()` | Iterates `GH_SLUGS` and calls each company's Greenhouse board API |
+| `LEVER_SLUGS` list | Company slugs for Lever (`api.lever.co/v0/postings/{slug}?mode=json`) |
+| `ASHBY_SLUGS` list | Company slugs for Ashby (scrapes `jobs.ashbyhq.com/{slug}` → `window.__appData`) |
+| `fetch_linkedin()` | Scrapes LinkedIn guest jobs API, 24h window, <200 applicants filter |
+| `fetch_workable()` | Calls Workable's public API v1 — no company list needed. v3 is dead as of 2026. |
+| `fetch_greenhouse()` | Iterates `GH_SLUGS` in parallel (20 workers via ThreadPoolExecutor) |
+| `fetch_lever()` | Iterates `LEVER_SLUGS` in parallel — `createdAt` is Unix ms, `hostedUrl` is apply link |
+| `fetch_ashby()` | Iterates `ASHBY_SLUGS` in parallel — extracts SSR JSON from `window.__appData` |
 | `send_telegram()` | POSTs to Telegram Bot API using MarkdownV2 formatting |
-| `main()` | Orchestrates fetch → diff → alert → save. `--seed` flag skips alerts (first run) |
+| `main()` | Orchestrates fetch → dedup → diff → alert → save. `--seed` skips alerts (first run) |
 
 ## Adding / changing things
 
@@ -82,9 +86,11 @@ python job_alert.py          # normal run — sends alerts for any new jobs
 
 | Platform | Endpoint | Auth needed? | Notes |
 |---|---|---|---|
-| LinkedIn | `linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?keywords=...&f_TPR=r3600` | ❌ No | Guest API, no login. Returns HTML cards. |
+| LinkedIn | `linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?keywords=...&f_TPR=r86400` | ❌ No | Guest API, no login. Returns HTML cards. 24h window. |
 | Workable | `jobs.workable.com/api/v1/jobs?query=...&location=USA` | ❌ No | JSON, global search. v3 is dead. |
 | Greenhouse | `boards-api.greenhouse.io/v1/boards/{slug}/jobs` | ❌ No | Per-company only. `my.greenhouse.io` requires login — can't use. |
+| Lever | `api.lever.co/v0/postings/{slug}?mode=json` | ❌ No | Per-company. Returns JSON array. `createdAt` = Unix ms. |
+| Ashby | `jobs.ashbyhq.com/{slug}` (HTML scrape) | ❌ No | Extracts `window.__appData.jobBoard.jobPostings`. SSR-only — some orgs return null jobBoard (skipped). `api.ashbyhq.com` requires org API key. |
 
 ## What "Rippling" means here
 Rippling is an HR platform that companies use as an ATS. Individual company job boards

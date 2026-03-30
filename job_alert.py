@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 APM & Product Intern Job Alert
-Monitors LinkedIn, Workable, and Greenhouse for new roles.
+Monitors LinkedIn, Workable, Greenhouse, Lever, and Ashby for new roles.
 Sends a Telegram message the moment a match is found.
 
 Usage:
@@ -16,6 +16,7 @@ import re
 import time
 import logging
 import hashlib
+import html as html_lib
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -49,10 +50,12 @@ log = logging.getLogger(__name__)
 # A title must match at least one INCLUDE pattern and zero EXCLUDE patterns.
 
 INCLUDE = [
+    re.compile(r"\bproduct\s+manager\b", re.I),                   # broad catch — experience filtered by description
     re.compile(r"\bassociate\s+product\s+manager\b", re.I),
     re.compile(r"\bproduct\s+management\s+intern(ship)?\b", re.I),
     re.compile(r"\bproduct\s+manager\s+intern(ship)?\b", re.I),
     re.compile(r"\bpm\s+intern(ship)?\b", re.I),
+    re.compile(r"\bjunior\s+pm\b", re.I),
     # "APM" alone — but NOT when followed by words that signal App Perf Monitoring
     re.compile(
         r"\bapm\b(?!\s*[-–]?\s*(engineer|developer|tool|platform|monitor|"
@@ -63,15 +66,25 @@ INCLUDE = [
 ]
 
 EXCLUDE = [
+    # Seniority — title-based (checked before description parsing)
+    re.compile(r"\bsenior\s+(associate\s+)?product\s+manager\b", re.I),
+    re.compile(r"\blead\s+product\s+manager\b", re.I),
+    re.compile(r"\bprincipal\s+product\s+manager\b", re.I),
+    re.compile(r"\bstaff\s+product\s+manager\b", re.I),
+    re.compile(r"\bgroup\s+product\s+manager\b", re.I),
+    re.compile(r"\bsr\.?\s+product\s+manager\b", re.I),
+    re.compile(r"\bsenior\s+pm\b", re.I),
+    re.compile(r"\blead\s+pm\b", re.I),
+    re.compile(r"\bprincipal\s+pm\b", re.I),
+    re.compile(r"\bdirector\b", re.I),
+    re.compile(r"\bvp\b", re.I),
+    re.compile(r"\bhead\s+of\b", re.I),
+    # False-positive prevention
     re.compile(r"\bproduct\s+design\s+intern\b", re.I),
     re.compile(r"\bproduct\s+engineer(ing)?\s+intern\b", re.I),
     re.compile(r"\bproduct\s+marketing\s+intern\b", re.I),
     re.compile(r"\bapplication\s+performance\b", re.I),
-    re.compile(r"\bengineering\b.{0,30}\bapm\b", re.I),   # "Engineering - APM ..."
-    re.compile(r"\bsenior\s+(associate\s+)?product\s+manager\b", re.I),  # skip senior roles
-    re.compile(r"\bdirector\b", re.I),
-    re.compile(r"\bvp\b", re.I),
-    re.compile(r"\bhead\s+of\b", re.I),
+    re.compile(r"\bengineering\b.{0,30}\bapm\b", re.I),
 ]
 
 
@@ -81,6 +94,39 @@ def is_match(title: str) -> bool:
     if any(p.search(title) for p in EXCLUDE):
         return False
     return any(p.search(title) for p in INCLUDE)
+
+
+# ── Experience-level description filter ───────────────────────────────────────
+def _strip_html(html: str) -> str:
+    """Decode HTML entities then strip tags — handles both raw HTML and entity-encoded HTML
+    (Greenhouse returns &lt;tag&gt; rather than literal angle brackets)."""
+    decoded = html_lib.unescape(html or "")
+    return re.sub(r'<[^>]+>', ' ', decoded)
+
+
+# Matches: "3+ years of experience", "5 years of product experience",
+#          "3-5 years of relevant experience", "4 years in product management"
+_EXP_RE = re.compile(
+    r'(\d+)\s*\+?\s*(?:[-–]\s*\d+\s*\+?)?\s*years?\s+'
+    r'(?:of\s+)?(?:(?:relevant|professional|product|total|prior|work)\s+)?'
+    r'(?:experience|in\s+(?:product|pm|project))',
+    re.I,
+)
+
+
+def _requires_over_3yrs(text: str) -> bool:
+    """Return True if the description explicitly requires 3+ years of experience.
+    Uses the MINIMUM of any range found (e.g. "2-4 years" → min=2 → include).
+    Fails open (returns False) when no year pattern is found — never miss a job."""
+    if not text:
+        return False
+    for m in _EXP_RE.finditer(text):
+        try:
+            if int(m.group(1)) >= 3:
+                return True
+        except (IndexError, ValueError):
+            continue
+    return False
 
 
 # ── Cross-platform deduplication ──────────────────────────────────────────────
@@ -182,9 +228,10 @@ def send_telegram(job: dict):
 # <200 applicants rule. Cards without an applicant count (new postings) pass.
 _LI_BASE = (
     "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
-    "?location=United+States&f_TPR=r86400&count=25&keywords={kw}&start={start}"
+    "?location=United+States&f_TPR=r86400&f_E=1%2C2%2C3&count=25&keywords={kw}&start={start}"
 )
-# f_TPR=r86400 = last 24 hours. Wider than 1 hour to never miss a posting.
+# f_TPR=r86400 = last 24 hours.
+# f_E=1,2,3   = Internship, Entry level, Associate — LinkedIn filters seniority for us.
 # seen_jobs.json dedup ensures we never re-alert on the same job.
 _LI_MAX_PAGES      = 20    # 20 × 25 = 500 results per keyword max
 _LI_MAX_APPLICANTS = 200   # skip jobs at or above this threshold
@@ -206,7 +253,7 @@ def _li_applicant_count(card_html: str) -> int:
 def fetch_linkedin() -> list[dict]:
     jobs    = []
     seen_li = set()
-    for kw in ["associate product manager", "product management intern", "pm intern"]:
+    for kw in ["product manager", "associate product manager", "product management intern", "pm intern"]:
         for page in range(_LI_MAX_PAGES):
             start = page * 25
             url   = _LI_BASE.format(kw=requests.utils.quote(kw), start=start)
@@ -292,6 +339,10 @@ def fetch_workable() -> list[dict]:
                         continue
                     if not posted_within_24h(job.get("created") or job.get("updated")):
                         continue
+                    desc = (_strip_html(job.get("description", "") or "")
+                            + " " + _strip_html(job.get("requirementsSection", "") or ""))
+                    if _requires_over_3yrs(desc):
+                        continue
                     seen_wk.add(jid)
                     loc = job.get("location") or ""
                     if isinstance(loc, dict):
@@ -364,7 +415,7 @@ GH_WORKERS = 20   # concurrent Greenhouse requests — fast without hammering
 
 def _fetch_one_greenhouse(slug: str) -> list[dict]:
     """Fetch jobs for a single Greenhouse company slug. Returns list of matched jobs."""
-    url = f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs"
+    url = f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=true"
     try:
         r = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
         if r.status_code in (404, 410):
@@ -377,6 +428,8 @@ def _fetch_one_greenhouse(slug: str) -> list[dict]:
             if not is_match(title):
                 continue
             if not posted_within_24h(job.get("first_published") or job.get("updated_at")):
+                continue
+            if _requires_over_3yrs(_strip_html(job.get("content", ""))):
                 continue
             jid = str(job.get("id", ""))
             results.append({
@@ -408,6 +461,166 @@ def fetch_greenhouse() -> list[dict]:
     return jobs
 
 
+# ── Lever ─────────────────────────────────────────────────────────────────────
+# Per-company public API — no auth needed.
+# Slug is the path segment at jobs.lever.co/{slug}
+# Confirmed working: plaid. Others handled gracefully on 404.
+
+LEVER_SLUGS = [
+    # Confirmed working
+    "plaid",
+    # SF / Bay Area — fintech & productivity
+    "benchling", "ironclad", "gong", "podium", "persona",
+    "braintrust", "watershed", "sardine", "increase",
+    "chime", "vanta", "drata", "secureframe",
+    "mercury", "faire", "miro", "clickup", "superhuman",
+    "lob", "amplitude", "lattice", "flexport",
+    "kalshi", "brex", "notion", "figma",
+    # Dallas / DFW
+    "carvana", "slalom",
+]
+
+_LV_WORKERS = 20
+
+
+def _fetch_one_lever(slug: str) -> list[dict]:
+    url = f"https://api.lever.co/v0/postings/{slug}?mode=json"
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+        if r.status_code in (403, 404, 410):
+            return []
+        if r.status_code != 200:
+            return []
+        company = slug.replace("-", " ").title()
+        results = []
+        for job in r.json():
+            title = job.get("text", "")
+            if not is_match(title):
+                continue
+            created_ms = job.get("createdAt", 0)
+            if created_ms:
+                posted = datetime.fromtimestamp(created_ms / 1000, tz=timezone.utc)
+                if datetime.now(timezone.utc) - posted > _CUTOFF:
+                    continue
+            desc = job.get("descriptionPlain", "") or ""
+            for lst in (job.get("lists") or []):
+                desc += " " + _strip_html(lst.get("content", "") or "")
+            if _requires_over_3yrs(desc):
+                continue
+            jid  = job.get("id", "")
+            cats = job.get("categories") or {}
+            loc  = cats.get("location") or (cats.get("allLocations") or [""])[0]
+            results.append({
+                "id":       f"lv_{jid}",
+                "source":   "Lever",
+                "title":    title,
+                "company":  company,
+                "location": loc if isinstance(loc, str) else "",
+                "url":      job.get("hostedUrl") or f"https://jobs.lever.co/{slug}/{jid}",
+            })
+        return results
+    except Exception as e:
+        log.warning("Lever error (%s): %s", slug, e)
+        return []
+
+
+def fetch_lever() -> list[dict]:
+    jobs    = []
+    seen_lv = set()
+    with ThreadPoolExecutor(max_workers=_LV_WORKERS) as pool:
+        futures = {pool.submit(_fetch_one_lever, slug): slug for slug in LEVER_SLUGS}
+        for future in as_completed(futures):
+            for job in future.result():
+                if job["id"] not in seen_lv:
+                    seen_lv.add(job["id"])
+                    jobs.append(job)
+    log.info("Lever: %d matches across %d companies", len(jobs), len(LEVER_SLUGS))
+    return jobs
+
+
+# ── Ashby ─────────────────────────────────────────────────────────────────────
+# Ashby embeds job data in window.__appData on each company's jobs page.
+# The dedicated API (api.ashbyhq.com) requires an org-level API key — unusable.
+# We extract the embedded JSON using json.JSONDecoder.raw_decode().
+# Confirmed SSR (pre-rendered): linear, ramp. Others handled gracefully on null jobBoard.
+
+ASHBY_SLUGS = [
+    # Confirmed SSR pre-rendering
+    "linear", "ramp",
+    # SF / Bay Area startups
+    "retool", "anduril", "elevenlabs",
+    "cohere", "supabase", "posthog", "hightouch",
+    "runway", "modal", "replit", "cursor",
+    "browserbase", "together", "coreweave",
+    "scale-ai", "glean", "perplexity",
+    # Dallas / DFW
+    "toyotaconnected",
+]
+
+_AB_WORKERS = 20
+
+
+def _fetch_one_ashby(org: str) -> list[dict]:
+    url = f"https://jobs.ashbyhq.com/{org}"
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+        if r.status_code in (403, 404, 410):
+            return []
+        if r.status_code != 200:
+            return []
+        html = r.text
+        m = re.search(r'window\.__appData\s*=\s*', html)
+        if not m:
+            return []
+        brace_idx = html.find('{', m.end())
+        if brace_idx < 0:
+            return []
+        try:
+            data, _ = json.JSONDecoder().raw_decode(html, brace_idx)
+        except json.JSONDecodeError:
+            return []
+        job_board = data.get("jobBoard")
+        if not job_board:
+            return []   # page loaded but JS-only (no SSR data) — skip
+        org_name = (data.get("organization") or {}).get("name") or org.replace("-", " ").title()
+        cutoff_date = (datetime.now(timezone.utc) - _CUTOFF).date().isoformat()
+        results = []
+        for job in job_board.get("jobPostings", []):
+            title = job.get("title", "")
+            if not is_match(title):
+                continue
+            pub_date = job.get("publishedDate", "")
+            if pub_date and pub_date < cutoff_date:
+                continue
+            jid = job.get("id", "")
+            results.append({
+                "id":       f"ab_{jid}",
+                "source":   "Ashby",
+                "title":    title,
+                "company":  org_name,
+                "location": job.get("locationName") or job.get("workplaceType") or "",
+                "url":      f"https://jobs.ashbyhq.com/{org}/{jid}",
+            })
+        return results
+    except Exception as e:
+        log.warning("Ashby error (%s): %s", org, e)
+        return []
+
+
+def fetch_ashby() -> list[dict]:
+    jobs    = []
+    seen_ab = set()
+    with ThreadPoolExecutor(max_workers=_AB_WORKERS) as pool:
+        futures = {pool.submit(_fetch_one_ashby, org): org for org in ASHBY_SLUGS}
+        for future in as_completed(futures):
+            for job in future.result():
+                if job["id"] not in seen_ab:
+                    seen_ab.add(job["id"])
+                    jobs.append(job)
+    log.info("Ashby: %d matches across %d companies", len(jobs), len(ASHBY_SLUGS))
+    return jobs
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
     seed_mode = "--seed" in sys.argv
@@ -416,7 +629,7 @@ def main():
     log.info("Mode: %s | Previously tracked: %d jobs", "SEED" if seed_mode else "LIVE", len(seen))
 
     # Order matters: LinkedIn first → preferred source when cross-platform dedup fires
-    all_jobs = fetch_linkedin() + fetch_workable() + fetch_greenhouse()
+    all_jobs = fetch_linkedin() + fetch_workable() + fetch_greenhouse() + fetch_lever() + fetch_ashby()
     new_ids  = {job["id"] for job in all_jobs}
 
     # Step 1 — filter to jobs not seen in previous runs
