@@ -658,10 +658,16 @@ def main():
 
     # Order matters: LinkedIn first → preferred source when cross-platform dedup fires
     all_jobs = fetch_linkedin() + fetch_workable() + fetch_greenhouse() + fetch_lever() + fetch_ashby()
-    new_ids  = {job["id"] for job in all_jobs}
 
-    # Step 1 — filter to jobs not seen in previous runs
-    new_jobs = [job for job in all_jobs if job["id"] not in seen]
+    # Collect both IDs and title|company fingerprints for this run
+    new_ids          = {job["id"]           for job in all_jobs}
+    new_fingerprints = {_fingerprint(job)   for job in all_jobs}
+
+    # Step 1 — filter to jobs not seen in previous runs (by ID *and* fingerprint)
+    # Fingerprint dedup prevents the same role from alerting again when a hirer
+    # reposts it on LinkedIn with a brand-new job ID.
+    new_jobs = [job for job in all_jobs
+                if job["id"] not in seen and _fingerprint(job) not in seen]
 
     # Step 2 — cross-platform dedup: same title+company from multiple sources = 1 alert
     new_jobs = dedup_across_platforms(new_jobs)
@@ -677,7 +683,8 @@ def main():
             except Exception as e:
                 log.error("Failed to send alert for %s: %s", job["title"], e)
 
-    save_seen(seen | new_ids)
+    # Save both IDs and fingerprints so future runs skip this job regardless of ID changes
+    save_seen(seen | new_ids | new_fingerprints)
 
 
 if __name__ == "__main__":
