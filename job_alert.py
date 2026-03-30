@@ -16,6 +16,7 @@ import re
 import time
 import logging
 import hashlib
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
@@ -104,6 +105,24 @@ def dedup_across_platforms(jobs: list[dict]) -> list[dict]:
             seen_fp.add(fp)
             result.append(job)
     return result
+
+
+# ── 24-hour recency check ─────────────────────────────────────────────────────
+_CUTOFF = timedelta(hours=24)
+
+
+def posted_within_24h(date_str: str) -> bool:
+    """Return True if date_str is within the last 24 hours.
+    Fails open (returns True) if the date cannot be parsed — never miss a job."""
+    if not date_str:
+        return True
+    try:
+        ds = date_str.strip().replace("Z", "+00:00")
+        ds = re.sub(r'\.\d+(?=[+-])', '', ds)   # strip fractional seconds
+        posted = datetime.fromisoformat(ds)
+        return datetime.now(timezone.utc) - posted <= _CUTOFF
+    except Exception:
+        return True
 
 
 # ── State ─────────────────────────────────────────────────────────────────────
@@ -271,6 +290,8 @@ def fetch_workable() -> list[dict]:
                     jid   = job.get("id", "") or hashlib.md5(title.encode()).hexdigest()[:10]
                     if jid in seen_wk or not is_match(title):
                         continue
+                    if not posted_within_24h(job.get("created") or job.get("updated")):
+                        continue
                     seen_wk.add(jid)
                     loc = job.get("location") or ""
                     if isinstance(loc, dict):
@@ -354,6 +375,8 @@ def _fetch_one_greenhouse(slug: str) -> list[dict]:
         for job in r.json().get("jobs", []):
             title = job.get("title", "")
             if not is_match(title):
+                continue
+            if not posted_within_24h(job.get("first_published") or job.get("updated_at")):
                 continue
             jid = str(job.get("id", ""))
             results.append({
