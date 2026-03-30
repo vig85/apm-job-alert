@@ -67,16 +67,15 @@ INCLUDE = [
 ]
 
 EXCLUDE = [
-    # Seniority — title-based (checked before description parsing)
-    re.compile(r"\bsenior\s+(associate\s+)?product\s+manager\b", re.I),
-    re.compile(r"\bsenior\s+product\s+analyst\b", re.I),
-    re.compile(r"\blead\s+product\s+analyst\b", re.I),
-    re.compile(r"\bsr\.?\s+product\s+analyst\b", re.I),
-    re.compile(r"\blead\s+product\s+manager\b", re.I),
-    re.compile(r"\bprincipal\s+product\s+manager\b", re.I),
-    re.compile(r"\bstaff\s+product\s+manager\b", re.I),
-    re.compile(r"\bgroup\s+product\s+manager\b", re.I),
-    re.compile(r"\bsr\.?\s+product\s+manager\b", re.I),
+    # Seniority — allow words between level and "product manager/analyst"
+    # catches "Sr. Technical Product Manager", "Staff AI Product Manager", etc.
+    re.compile(r"\b(senior|sr\.?)\b.{0,20}\bproduct\s+manager\b", re.I),
+    re.compile(r"\b(senior|sr\.?)\b.{0,20}\bproduct\s+analyst\b", re.I),
+    re.compile(r"\blead\b.{0,20}\bproduct\s+manager\b", re.I),
+    re.compile(r"\blead\b.{0,20}\bproduct\s+analyst\b", re.I),
+    re.compile(r"\bprincipal\b.{0,20}\bproduct\s+manager\b", re.I),
+    re.compile(r"\bstaff\b.{0,20}\bproduct\s+manager\b", re.I),
+    re.compile(r"\bgroup\b.{0,20}\bproduct\s+manager\b", re.I),
     re.compile(r"\bsenior\s+pm\b", re.I),
     re.compile(r"\blead\s+pm\b", re.I),
     re.compile(r"\bprincipal\s+pm\b", re.I),
