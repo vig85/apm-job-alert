@@ -251,11 +251,19 @@ _LI_AGGREGATORS = re.compile(
 )
 
 
+def _li_is_repost(card_html: str) -> bool:
+    """Return True if the card says 'Reposted' — these are recycled old listings."""
+    return bool(re.search(r'\breposted\b', card_html, re.I))
+
+
 def _li_applicant_count(card_html: str) -> int:
     """Return applicant count from a single LinkedIn card's HTML.
     Returns 0 if not shown (new posting — treat as low applicants)."""
     # "Over 200 applicants" → 201
     if re.search(r'over\s+200\s+applicants?', card_html, re.I):
+        return 201
+    # "Over 100 people clicked apply" → 101
+    if re.search(r'over\s+\d+\s+people\s+clicked\s+apply', card_html, re.I):
         return 201
     # "47 applicants" or "1,234 applicants"
     m = re.search(r'([\d,]+)\s+applicants?', card_html, re.I)
@@ -288,6 +296,10 @@ def fetch_linkedin() -> list[dict]:
                         continue
                     jid = jid_m.group(1)
                     if jid in seen_li:
+                        continue
+                    # ── Skip reposts — old listings recycled by the hirer ──
+                    if _li_is_repost(card):
+                        seen_li.add(jid)
                         continue
                     # ── Applicant count filter ──
                     count = _li_applicant_count(card)
