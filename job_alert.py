@@ -52,6 +52,7 @@ log = logging.getLogger(__name__)
 INCLUDE = [
     re.compile(r"\bproduct\s+manager\b", re.I),                   # broad catch — experience filtered by description
     re.compile(r"\bassociate\s+product\s+manager\b", re.I),
+    re.compile(r"\bproduct\s+analyst\b", re.I),                   # product analyst roles
     re.compile(r"\bproduct\s+management\s+intern(ship)?\b", re.I),
     re.compile(r"\bproduct\s+manager\s+intern(ship)?\b", re.I),
     re.compile(r"\bpm\s+intern(ship)?\b", re.I),
@@ -68,6 +69,9 @@ INCLUDE = [
 EXCLUDE = [
     # Seniority — title-based (checked before description parsing)
     re.compile(r"\bsenior\s+(associate\s+)?product\s+manager\b", re.I),
+    re.compile(r"\bsenior\s+product\s+analyst\b", re.I),
+    re.compile(r"\blead\s+product\s+analyst\b", re.I),
+    re.compile(r"\bsr\.?\s+product\s+analyst\b", re.I),
     re.compile(r"\blead\s+product\s+manager\b", re.I),
     re.compile(r"\bprincipal\s+product\s+manager\b", re.I),
     re.compile(r"\bstaff\s+product\s+manager\b", re.I),
